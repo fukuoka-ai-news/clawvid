@@ -3,7 +3,7 @@ import type { Scene } from '../schemas/scene.js';
 import type { AppConfig } from '../config/loader.js';
 import { AssetManager } from './asset-manager.js';
 import { generateImage } from '../fal/image.js';
-import { generateVideo, generateTransition, generateTalkingHead } from '../fal/video.js';
+import { generateVideo, generateTransition, generateTalkingHead, generateTalkingHeadWithAudio } from '../fal/video.js';
 import { generateSpeech, transcribe } from '../fal/audio.js';
 import { generateSoundEffect } from '../fal/sound.js';
 import { generateMusic } from '../fal/music.js';
@@ -35,6 +35,7 @@ const COST_ESTIMATES = {
   transition_vidu: 0.77,
   // Talking head / lip-sync
   talking_head_fabric: 0.50, // VEED Fabric 1.0 estimate
+  talking_head_sadtalker: 0.10, // SadTalker estimate
   tts: 0.09,
   transcription: 0.001,
   sound_effect: 0.10,
@@ -58,6 +59,8 @@ export interface NarrationSegment {
   audioUrl: string;
   actualDuration: number;
   computedStart: number;
+  /** Word-level timing from VOICEVOX mora analysis (bypasses Whisper) */
+  wordTimings?: Array<{ text: string; start: number; end: number }>;
 }
 
 export interface ComputedSceneTiming {
@@ -186,7 +189,8 @@ export async function executeWorkflow(
           cache,
           costTracker,
           skipCache,
-          { regenerateSceneIds, skipVideos: phase === 'images' },
+          { regenerateSceneIds, skipVideos: phase === 'images', narrationSegments },
+          config,
         );
 
     // Run Vision QA if enabled
@@ -228,6 +232,8 @@ export async function executeWorkflow(
       assetManager,
       costTracker,
       totalDuration,
+      cache,
+      skipCache,
     );
   }
 
@@ -293,7 +299,11 @@ async function generateNarrationFirst(
 
     // Build TTS config with voice cloning for scenes after the first
     const ttsConfig = { ...workflow.audio.tts };
-    if (i > 0 && firstAudioUrl && !ttsConfig.voice_reference) {
+    // Per-scene voice override (e.g. 四国めたん for hook/CTA)
+    if (scene.voice_override) {
+      ttsConfig.voice = scene.voice_override;
+    }
+    if (i > 0 && firstAudioUrl && !ttsConfig.voice_reference && !scene.voice_override) {
       ttsConfig.voice_reference = firstAudioUrl;
     }
 
@@ -304,17 +314,31 @@ async function generateNarrationFirst(
 
     let audioUrl: string;
     let actualDuration = 0;
+    let voicevoxTimings: Array<{ text: string; start: number; end: number }> | undefined;
 
     if (!skipCache && cache.has(`${scene.id}-narration`, narrationHash)) {
       const cached = cache.get(`${scene.id}-narration`)!;
       audioUrl = cached.outputPath;
       log.info('Narration cache hit', { sceneId: scene.id });
+      // Re-fetch VOICEVOX word timings even on cache hit (audio_query is fast)
+      if (ttsConfig.model === 'voicevox') {
+        try {
+          const { getVoicevoxTimings } = await import('../fal/audio.js');
+          voicevoxTimings = await getVoicevoxTimings(ttsConfig, narrationText);
+        } catch (err) {
+          log.warn('Failed to get VOICEVOX timings on cache hit', { error: String(err) });
+        }
+      }
     } else {
       spinner.text = `Narrating scene ${scene.id}${i > 0 ? ' (voice-cloned)' : ''}...`;
       const result = await generateSpeech(ttsConfig, narrationText, audioPath);
       audioUrl = result.url;
       if (result.duration) {
         actualDuration = result.duration;
+      }
+      // Store VOICEVOX word timings if available
+      if (result.wordTimings) {
+        voicevoxTimings = result.wordTimings;
       }
       await cache.set(`${scene.id}-narration`, narrationHash, result.url);
       costTracker.record(ttsConfig.model, COST_ESTIMATES.tts);
@@ -344,6 +368,7 @@ async function generateNarrationFirst(
       audioUrl,
       actualDuration,
       computedStart: 0, // will be set by computeTiming()
+      wordTimings: voicevoxTimings,
     });
   }
 
@@ -363,6 +388,7 @@ export function computeTiming(
   const timingMode = workflow.timing_mode ?? 'tts_driven';
   const padding = workflow.scene_padding_seconds ?? 0.5;
   const minDuration = workflow.min_scene_duration_seconds ?? 3;
+  const maxDuration = workflow.max_scene_duration_seconds;
 
   const timings: ComputedSceneTiming[] = [];
   let currentStart = 0;
@@ -389,6 +415,15 @@ export function computeTiming(
         duration = scene.timing?.duration ?? minDuration;
         source = scene.timing?.duration ? 'workflow' : 'default';
       }
+    }
+
+    // Warn if scene exceeds max duration (narration too long for single cut)
+    if (maxDuration && duration > maxDuration) {
+      log.warn('Scene exceeds max duration — consider splitting narration', {
+        sceneId: scene.id,
+        duration: `${duration.toFixed(1)}s`,
+        max: `${maxDuration}s`,
+      });
     }
 
     timings.push({
@@ -423,6 +458,73 @@ async function transcribeWithSceneOffsets(
   const allChunks: Array<{ text: string; timestamp: [number, number] }> = [];
 
   for (const segment of narrationSegments) {
+    // Use VOICEVOX word timings if available (no Whisper needed)
+    if (segment.wordTimings && segment.wordTimings.length > 0) {
+      allText.push(segment.text);
+      for (const wt of segment.wordTimings) {
+        allChunks.push({
+          text: wt.text,
+          timestamp: [
+            wt.start + segment.computedStart,
+            wt.end + segment.computedStart,
+          ],
+        });
+      }
+      log.info('Using VOICEVOX word timings for transcription', {
+        sceneId: segment.sceneId,
+        phrases: segment.wordTimings.length,
+      });
+      continue;
+    }
+
+    // For VOICEVOX segments without word timings (e.g. VOICEVOX was unavailable
+    // during cache-hit re-timing), use the original narration text directly instead
+    // of Whisper. Whisper transcribing Japanese audio produces katakana readings
+    // mixed with kanji, which corrupts subtitle display.
+    if (segment.text) {
+      allText.push(segment.text);
+      // Split narration text by punctuation (same as extractVoicevoxTimings),
+      // then further split long segments to fit single-line subtitles (max 15 chars).
+      const MAX_FALLBACK_CHARS = 12;
+      let textParts = segment.text
+        .split(/(?<=[。、！？])/g)
+        .map((s: string) => s.trim())
+        .filter((s: string) => s.length > 0 && !/^[。、！？]+$/.test(s));
+
+      // Further split parts that exceed MAX_FALLBACK_CHARS
+      const splitParts: string[] = [];
+      for (const part of textParts) {
+        if (part.length <= MAX_FALLBACK_CHARS) {
+          splitParts.push(part);
+        } else {
+          // Split at roughly the midpoint
+          const mid = Math.ceil(part.length / 2);
+          splitParts.push(part.slice(0, mid));
+          splitParts.push(part.slice(mid));
+        }
+      }
+      textParts = splitParts;
+
+      if (textParts.length > 0) {
+        const partDuration = segment.actualDuration / textParts.length;
+        for (let j = 0; j < textParts.length; j++) {
+          allChunks.push({
+            text: textParts[j],
+            timestamp: [
+              segment.computedStart + j * partDuration,
+              segment.computedStart + (j + 1) * partDuration,
+            ],
+          });
+        }
+        log.info('Using narration text for subtitles (VOICEVOX timings unavailable)', {
+          sceneId: segment.sceneId,
+          parts: textParts.length,
+        });
+        continue;
+      }
+    }
+
+    // Fallback to Whisper for non-VOICEVOX audio (e.g. fal.ai TTS)
     try {
       const result = await transcribe(segment.audioUrl, whisperModel);
       allText.push(result.text);
@@ -465,6 +567,8 @@ async function transcribeWithSceneOffsets(
 interface GenerateAssetsOptions {
   regenerateSceneIds?: string[];
   skipVideos?: boolean;
+  /** Narration segments for audio-driven lip sync (SadTalker) */
+  narrationSegments?: NarrationSegment[];
 }
 
 async function generateSceneAssets(
@@ -474,6 +578,7 @@ async function generateSceneAssets(
   costTracker: CostTracker,
   skipCache: boolean,
   options: GenerateAssetsOptions = {},
+  appConfig?: AppConfig,
 ): Promise<SceneAssets[]> {
   const { regenerateSceneIds = [], skipVideos = false } = options;
   const results: SceneAssets[] = [];
@@ -487,7 +592,9 @@ async function generateSceneAssets(
     }
 
     // Skip if not in regenerate list (when regenerating specific scenes)
-    const shouldRegenerate = regenerateSceneIds.length === 0 || regenerateSceneIds.includes(scene.id);
+    // Force regeneration only for scenes explicitly listed via --regenerate.
+    // An empty list means "no scenes forced" — caching proceeds normally.
+    const shouldRegenerate = regenerateSceneIds.length > 0 && regenerateSceneIds.includes(scene.id);
 
     const spinner = createSpinner(`Scene ${scene.id}: generating image...`);
     spinner.start();
@@ -495,56 +602,97 @@ async function generateSceneAssets(
     const imageFilename = `${scene.id}.png`;
     const imagePath = assetManager.getAssetPath(imageFilename);
 
-    // Check if image_generation exists (required for non-static scenes)
-    if (!scene.image_generation) {
+    // Talking head scenes with avatar config can skip image generation entirely
+    const avatarCfg = appConfig?.avatar;
+    const isTalkingHeadWithAvatar = scene.type === 'talking_head' && avatarCfg?.enabled && avatarCfg.reference_image;
+
+    // Check if image_generation exists (required for non-static, non-avatar-talking-head scenes)
+    if (!scene.image_generation && !isTalkingHeadWithAvatar) {
       log.warn('No image_generation config for scene', { sceneId: scene.id });
       results.push({ sceneId: scene.id, imagePath: '', imageUrl: '' });
       spinner.fail(`Scene ${scene.id}: no image generation config`);
       continue;
     }
 
-    const imageHash = hashWorkflowStep(scene.image_generation as unknown as Record<string, unknown>);
+    let imageUrl: string = '';
 
-    let imageUrl: string;
-
-    if (!skipCache && !shouldRegenerate && cache.has(`${scene.id}-image`, imageHash)) {
-      const cached = cache.get(`${scene.id}-image`)!;
-      imageUrl = cached.outputPath;
-      spinner.text = `Scene ${scene.id}: image cached`;
-      log.info('Image cache hit', { sceneId: scene.id });
+    if (isTalkingHeadWithAvatar) {
+      // Copy avatar reference image as fallback for this scene
+      const { resolve } = await import('node:path');
+      const { copyFile } = await import('node:fs/promises');
+      const avatarSrc = resolve(process.cwd(), avatarCfg!.reference_image!);
+      await copyFile(avatarSrc, imagePath);
+      log.info('Copied avatar reference as scene image fallback', { sceneId: scene.id, avatarSrc, imagePath });
+      spinner.text = `Scene ${scene.id}: avatar scene (reference copied)`;
     } else {
-      const result = await generateImage(scene.image_generation, imagePath);
-      imageUrl = result.url;
-      await cache.set(`${scene.id}-image`, imageHash, result.url);
-      costTracker.record(scene.image_generation.model, estimateCost('image', scene.image_generation.model));
+      const imageHash = hashWorkflowStep(scene.image_generation as unknown as Record<string, unknown>);
+
+      if (!skipCache && !shouldRegenerate && cache.has(`${scene.id}-image`, imageHash)) {
+        const cached = cache.get(`${scene.id}-image`)!;
+        imageUrl = cached.outputPath;
+        spinner.text = `Scene ${scene.id}: image cached`;
+        log.info('Image cache hit', { sceneId: scene.id });
+      } else {
+        const result = await generateImage(scene.image_generation!, imagePath);
+        imageUrl = result.url;
+        await cache.set(`${scene.id}-image`, imageHash, result.url);
+        costTracker.record(scene.image_generation!.model, estimateCost('image', scene.image_generation!.model));
+      }
     }
 
     const sceneResult: SceneAssets = { sceneId: scene.id, imagePath, imageUrl };
 
-    // Handle talking head scenes (VEED Fabric)
+    // Handle talking head scenes (SadTalker audio-driven or VEED Fabric text-driven)
     if (scene.type === 'talking_head' && scene.talking_head) {
       spinner.text = `Scene ${scene.id}: generating talking head video...`;
       const videoFilename = `${scene.id}.mp4`;
       const videoPath = assetManager.getAssetPath(videoFilename);
 
-      // Use narration text or talking_head.input.text
-      const speechText = scene.talking_head.input.text || scene.narration || '';
-      if (!speechText) {
-        log.warn('No speech text for talking head scene', { sceneId: scene.id });
+      // Use fixed avatar reference image if configured
+      let avatarImageUrl = imageUrl;
+      const avatarConfig = appConfig?.avatar;
+      if (avatarConfig?.enabled && avatarConfig.reference_image) {
+        const { resolve } = await import('node:path');
+        const avatarPath = resolve(process.cwd(), avatarConfig.reference_image);
+        const { uploadToFal } = await import('../fal/client.js');
+        spinner.text = `Scene ${scene.id}: uploading avatar reference image...`;
+        avatarImageUrl = await uploadToFal(avatarPath);
+        log.info('Using fixed avatar reference image', { sceneId: scene.id, avatarPath });
       }
 
-      const talkingHeadSpec = {
-        ...scene.talking_head,
-        input: {
-          ...scene.talking_head.input,
-          text: speechText,
-        },
-      };
+      // Check if we have narration audio for audio-driven lip sync (SadTalker)
+      const narrationSegment = options.narrationSegments?.find((s) => s.sceneId === scene.id);
+      const model = scene.talking_head.model || avatarConfig?.talking_head_model || 'fal-ai/sadtalker';
+      const useSadTalker = model.includes('sadtalker') && narrationSegment?.audioPath;
 
-      const thResult = await generateTalkingHead(talkingHeadSpec, imageUrl, videoPath);
-      sceneResult.videoPath = videoPath;
-      sceneResult.videoUrl = thResult.url;
-      costTracker.record('veed/fabric-1.0/text', COST_ESTIMATES.talking_head_fabric);
+      if (useSadTalker) {
+        // Audio-driven lip sync: VOICEVOX audio → SadTalker → lip-synced video
+        spinner.text = `Scene ${scene.id}: SadTalker lip-sync (audio-driven)...`;
+        const thResult = await generateTalkingHeadWithAudio(
+          avatarImageUrl,
+          narrationSegment!.audioPath,
+          videoPath,
+          { faceModelResolution: '512', expressionScale: 1.0 },
+        );
+        sceneResult.videoPath = videoPath;
+        sceneResult.videoUrl = thResult.url;
+        costTracker.record('fal-ai/sadtalker', COST_ESTIMATES.talking_head_sadtalker);
+      } else {
+        // Fallback: text-driven lip sync (VEED Fabric)
+        const speechText = scene.talking_head.input.text || scene.narration || '';
+        if (!speechText) {
+          log.warn('No speech text for talking head scene', { sceneId: scene.id });
+        }
+        const talkingHeadSpec = {
+          ...scene.talking_head,
+          model: model.includes('sadtalker') ? 'veed/fabric-1.0/text' : model,
+          input: { ...scene.talking_head.input, text: speechText },
+        };
+        const thResult = await generateTalkingHead(talkingHeadSpec, avatarImageUrl, videoPath);
+        sceneResult.videoPath = videoPath;
+        sceneResult.videoUrl = thResult.url;
+        costTracker.record('veed/fabric-1.0/text', COST_ESTIMATES.talking_head_fabric);
+      }
 
       spinner.succeed(`Scene ${scene.id}: talking head video ready`);
       results.push(sceneResult);
@@ -555,7 +703,10 @@ async function generateSceneAssets(
       spinner.text = `Scene ${scene.id}: generating video...`;
       const videoFilename = `${scene.id}.mp4`;
       const videoPath = assetManager.getAssetPath(videoFilename);
-      const videoHash = hashWorkflowStep(scene.video_generation as unknown as Record<string, unknown>);
+      const videoHash = hashWorkflowStep({
+        ...scene.video_generation as unknown as Record<string, unknown>,
+        _source_image: imageUrl,
+      });
 
       if (!skipCache && cache.has(`${scene.id}-video`, videoHash)) {
         const cached = cache.get(`${scene.id}-video`)!;
@@ -719,9 +870,10 @@ async function generateSceneAssetsViaWorkflow(
     const videoFilename = `${scene.id}.mp4`;
     const videoPath = assetManager.getAssetPath(videoFilename);
 
-    // Build cache hash including chaining info
+    // Build cache hash including chaining info and source image
     const videoHashData: Record<string, unknown> = {
       ...scene.video_generation as unknown as Record<string, unknown>,
+      _source_image: sceneAsset?.imageUrl,
       chain_frames: chainFrames,
       prev_end_frame: previousEndFrameUrl ? 'chained' : null,
     };
@@ -898,11 +1050,14 @@ async function generateBackgroundMusic(
   assetManager: AssetManager,
   costTracker: CostTracker,
   computedTotalDuration: number,
+  cache: CacheStore,
+  skipCache?: boolean,
 ): Promise<string | undefined> {
   const musicConfig = workflow.audio.music;
   if (!musicConfig?.generate || !musicConfig.prompt) return undefined;
 
-  const musicModel = config.fal.audio.music_generation ?? 'beatoven/music-generation';
+  // Priority: workflow-level override > app config > default
+  const musicModel = musicConfig.model ?? config.fal.audio.music_generation ?? 'beatoven/music-generation';
   const duration = musicConfig.duration ?? computedTotalDuration;
 
   const spinner = createSpinner('Generating background music...');
@@ -910,13 +1065,43 @@ async function generateBackgroundMusic(
 
   const musicPath = assetManager.getAssetPath('music-generated.wav');
 
+  // Cache key covers everything that affects the generated audio
+  const musicHash = hashWorkflowStep({
+    model: musicModel,
+    prompt: musicConfig.prompt,
+    duration,
+  });
+
+  const { pathExists } = await import('fs-extra');
+  if (!skipCache && cache.has('music', musicHash)) {
+    const cached = cache.get('music')!;
+    // Prefer local file if still present, otherwise fall back to cached URL
+    if (await pathExists(musicPath)) {
+      spinner.succeed('Background music cached (local)');
+      log.info('Music cache hit (local file)', { path: musicPath });
+      return musicPath;
+    }
+    if (cached.outputPath.startsWith('http')) {
+      try {
+        const { downloadFile } = await import('../fal/client.js');
+        await downloadFile(cached.outputPath, musicPath);
+        spinner.succeed('Background music cached (re-downloaded)');
+        log.info('Music cache hit (downloaded)', { url: cached.outputPath });
+        return musicPath;
+      } catch (err) {
+        log.warn('Cached music download failed, regenerating', { error: String(err) });
+      }
+    }
+  }
+
   try {
-    await generateMusic(
+    const result = await generateMusic(
       musicModel,
       { prompt: musicConfig.prompt, duration },
       musicPath,
     );
     costTracker.record(musicModel, COST_ESTIMATES.music);
+    await cache.set('music', musicHash, result.url);
     spinner.succeed('Background music generated');
     return musicPath;
   } catch (err) {
@@ -1005,7 +1190,10 @@ async function generateVideosOnly(
     spinner.text = `Scene ${scene.id}: generating video...`;
     const videoFilename = `${scene.id}.mp4`;
     const videoPath = assetManager.getAssetPath(videoFilename);
-    const videoHash = hashWorkflowStep(scene.video_generation as unknown as Record<string, unknown>);
+    const videoHash = hashWorkflowStep({
+      ...scene.video_generation as unknown as Record<string, unknown>,
+      _source_image: assets.imageUrl,
+    });
 
     if (!skipCache && cache.has(`${scene.id}-video`, videoHash)) {
       const cached = cache.get(`${scene.id}-video`)!;

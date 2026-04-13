@@ -121,6 +121,39 @@
     }
   },
 
+  "avatar": {
+    "enabled": true,
+    "reference_image": "assets/avatar-reference.png",
+    "talking_head_model": "fal-ai/sadtalker",
+    "voice_description": "young Japanese woman, friendly and energetic, natural Japanese accent",
+    "resolution": "720p"
+  },
+
+  "bgm_categories": {
+    "default": "assets/bgm/daily-news.mp3",
+    "incident": "assets/bgm/daily-news.mp3",
+    "gourmet": "assets/bgm/daily-news.mp3",
+    "sports": "assets/bgm/daily-news.mp3",
+    "development": "assets/bgm/daily-news.mp3",
+    "culture": "assets/bgm/daily-news.mp3",
+    "weather": "assets/bgm/daily-news.mp3"
+  },
+
+  "branding": {
+    "watermark": {
+      "enabled": true,
+      "text": "@fukuoka_ai_news",
+      "position": "bottom-right",
+      "opacity": 0.7
+    },
+    "endcard": {
+      "enabled": true,
+      "duration_seconds": 2,
+      "follow_text": "フォローよろしくね！",
+      "like_text": "いいね♡"
+    }
+  },
+
   "output": {
     "directory": "output",
     "format": "mp4",

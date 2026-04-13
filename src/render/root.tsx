@@ -14,7 +14,10 @@ function calculateDuration({ props }: { props: CompositionProps }) {
   const lastFrame = Math.max(
     ...scenes.map((s) => s.startFrame + s.durationFrames),
   );
-  return { durationInFrames: lastFrame > 0 ? lastFrame : DEFAULT_DURATION_FRAMES };
+  // Add endcard duration if enabled
+  const endCardFrames = props.endCard?.enabled ? props.endCard.durationFrames : 0;
+  const total = lastFrame + endCardFrames;
+  return { durationInFrames: total > 0 ? total : DEFAULT_DURATION_FRAMES };
 }
 
 const RemotionRoot: React.FC = () => {

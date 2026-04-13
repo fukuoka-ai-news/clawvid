@@ -23,7 +23,7 @@ export const SceneRenderer: React.FC<SceneRendererProps> = ({ scene, template, i
   ];
 
   // Determine the transition style
-  const transitionType = scene.transition ?? 'fade';
+  const transitionType = scene.transition ?? 'cut';
 
   return (
     <Transition type={transitionType} durationFrames={scene.durationFrames} isLast={isLast}>
@@ -76,8 +76,15 @@ const SceneContent: React.FC<SceneContentProps> = ({ scene, effects }) => {
     e.startsWith('kenburns') || e === 'ken_burns' || e === 'ken-burns',
   );
 
-  if (scene.type === 'video' && scene.src.endsWith('.mp4')) {
-    return <SceneVideo src={scene.src} volume={0} durationInFrames={scene.durationFrames} />;
+  if ((scene.type === 'video' || scene.type === 'talking_head') && scene.src.endsWith('.mp4')) {
+    return (
+      <SceneVideo
+        src={scene.src}
+        volume={0}
+        durationInFrames={scene.durationFrames}
+        clipDurationInFrames={scene.clipDurationFrames}
+      />
+    );
   }
 
   if (hasKenBurns) {

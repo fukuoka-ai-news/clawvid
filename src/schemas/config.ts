@@ -55,6 +55,33 @@ const platformSchema = z.object({
   audio_bitrate: z.string(),
 });
 
+const watermarkSchema = z.object({
+  enabled: z.boolean(),
+  text: z.string(),
+  position: z.enum(['bottom-right', 'bottom-left', 'top-right', 'top-left']).optional(),
+  opacity: z.number().min(0).max(1).optional(),
+}).optional();
+
+const endcardSchema = z.object({
+  enabled: z.boolean(),
+  duration_seconds: z.number().positive().optional(),
+  follow_text: z.string().optional(),
+  like_text: z.string().optional(),
+}).optional();
+
+const brandingSchema = z.object({
+  watermark: watermarkSchema,
+  endcard: endcardSchema,
+}).optional();
+
+const avatarSchema = z.object({
+  enabled: z.boolean(),
+  reference_image: z.string(),
+  talking_head_model: z.string(),
+  voice_description: z.string().optional(),
+  resolution: z.string().optional(),
+}).optional();
+
 export const configSchema = z.object({
   fal: falModelsSchema,
   defaults: z.object({
@@ -78,6 +105,9 @@ export const configSchema = z.object({
     codec: z.string(),
     naming: z.string(),
   }),
+  avatar: avatarSchema,
+  branding: brandingSchema,
+  bgm_categories: z.record(z.string(), z.string()).optional(),
 });
 
 export type Config = z.infer<typeof configSchema>;

@@ -179,16 +179,21 @@ export async function mixAudio(input: MixInput, outputPath: string): Promise<voi
     inputLabels.push(`[sfx${i}]`);
   }
 
-  // Mix all tracks: amix divides amplitude by input count, so we weight
-  // narration much higher to keep it dominant over music/SFX.
+  // Mix all tracks with equal weights so the `volume` filter values applied
+  // earlier directly determine the amplitude ratio between tracks. This lets
+  // callers express intent as "narration=1.0, music=0.4" meaning music plays
+  // at 40% of narration amplitude. `amix` normalizes by dividing by the sum
+  // of weights; with equal weights each track keeps its relative volume.
+  // `dynaudnorm` is intentionally omitted here because it dynamically
+  // re-balances amplitudes over time and would defeat the explicit ratio.
   const mixLabel = inputLabels.join('');
   const weightValues: number[] = [];
-  weightValues.push(3); // narration — dominant
-  if (hasMusic) weightValues.push(1); // music — background
-  for (let i = 0; i < sfxList.length; i++) weightValues.push(1); // SFX — accent
+  weightValues.push(1); // narration
+  if (hasMusic) weightValues.push(1); // music
+  for (let i = 0; i < sfxList.length; i++) weightValues.push(1); // SFX
   const weights = weightValues.join(' ');
   filterParts.push(
-    `${mixLabel}amix=inputs=${inputLabels.length}:duration=first:dropout_transition=3:weights=${weights},dynaudnorm=p=0.71:s=5[out]`,
+    `${mixLabel}amix=inputs=${inputLabels.length}:duration=first:dropout_transition=3:normalize=0:weights=${weights}[out]`,
   );
 
   // Build command

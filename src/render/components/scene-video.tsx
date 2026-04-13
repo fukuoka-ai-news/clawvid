@@ -1,10 +1,13 @@
-import { AbsoluteFill, Loop, OffthreadVideo } from 'remotion';
+import { AbsoluteFill, Img, OffthreadVideo, Sequence, useCurrentFrame } from 'remotion';
 
 export interface SceneVideoProps {
   src: string;
   startFrom?: number;
   volume?: number;
+  /** Total scene duration in frames */
   durationInFrames?: number;
+  /** Actual video clip duration in frames (for loop interval) */
+  clipDurationInFrames?: number;
 }
 
 export const SceneVideo: React.FC<SceneVideoProps> = ({
@@ -12,30 +15,29 @@ export const SceneVideo: React.FC<SceneVideoProps> = ({
   startFrom = 0,
   volume = 0,
   durationInFrames,
+  clipDurationInFrames,
 }) => {
-  const video = (
-    <OffthreadVideo
-      src={src}
-      startFrom={startFrom}
-      volume={volume}
-      style={{
-        width: '100%',
-        height: '100%',
-        objectFit: 'cover',
-      }}
-    />
+  const clipFrames = clipDurationInFrames ?? durationInFrames;
+  const needsFreeze = clipFrames && durationInFrames && clipFrames < durationInFrames;
+
+  // When scene is longer than clip, play video once then freeze on last frame.
+  // OffthreadVideo with endAt freezes on the last frame when the sequence continues.
+  return (
+    <AbsoluteFill>
+      <OffthreadVideo
+        src={src}
+        startFrom={startFrom}
+        // Freeze on last frame: when current frame exceeds clip duration,
+        // Remotion's OffthreadVideo naturally holds the last decoded frame
+        endAt={needsFreeze ? clipFrames : undefined}
+        volume={volume}
+        pauseWhenBuffering
+        style={{
+          width: '100%',
+          height: '100%',
+          objectFit: 'cover',
+        }}
+      />
+    </AbsoluteFill>
   );
-
-  // Loop the video if scene duration exceeds clip length
-  if (durationInFrames) {
-    return (
-      <AbsoluteFill>
-        <Loop durationInFrames={durationInFrames}>
-          {video}
-        </Loop>
-      </AbsoluteFill>
-    );
-  }
-
-  return <AbsoluteFill>{video}</AbsoluteFill>;
 };

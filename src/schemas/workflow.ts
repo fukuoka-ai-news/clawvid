@@ -3,6 +3,7 @@ import { sceneSchema } from './scene.js';
 
 export const ttsConfigSchema = z.object({
   model: z.string(),
+  voice: z.string().optional(),
   voice_reference: z.string().optional(),
   voice_prompt: z.string().optional(),
   language: z.string().optional(),
@@ -19,6 +20,8 @@ export const musicConfigSchema = z.object({
   fade_in: z.number().nonnegative().optional(),
   fade_out: z.number().nonnegative().optional(),
   generate: z.boolean().optional(),
+  /** Override the default music generation model (e.g. "cassetteai/music-generator", "fal-ai/stable-audio") */
+  model: z.string().optional(),
   prompt: z.string().optional(),
   duration: z.number().min(5).max(150).optional(),
 });
@@ -73,13 +76,24 @@ export const videoSettingsSchema = z.object({
   chain_duration: z.string().optional(),
 });
 
+export const metadataSchema = z.object({
+  /** Date string in MM/DD format (auto-generated from current date if not provided) */
+  date: z.string().optional(),
+  /** Day of week in Japanese (e.g. 木曜日, auto-generated if not provided) */
+  day_of_week: z.string().optional(),
+  /** City/ward/municipality name for location badge */
+  location: z.string().optional(),
+}).optional();
+
 export const workflowSchema = z.object({
   name: z.string(),
   template: z.string(),
+  metadata: metadataSchema,
   duration_target_seconds: z.number().positive().optional(),
   timing_mode: z.enum(['tts_driven', 'fixed']).optional(),
   scene_padding_seconds: z.number().nonnegative().optional(),
   min_scene_duration_seconds: z.number().positive().optional(),
+  max_scene_duration_seconds: z.number().positive().optional(),
   scenes: z.array(sceneSchema).min(1),
   audio: audioConfigSchema,
   subtitles: subtitlesConfigSchema.optional(),

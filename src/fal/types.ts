@@ -32,6 +32,16 @@ export interface FalFabricVideoOutput {
   };
 }
 
+// --- Talking Head (audio-driven): fal-ai/sadtalker ---
+export interface FalSadTalkerOutput {
+  video: {
+    url: string;
+    content_type?: string;
+    file_name?: string;
+    file_size?: number;
+  };
+}
+
 // --- TTS: fal-ai/qwen-3-tts/voice-design/1.7b ---
 export interface FalQwenTTSOutput {
   audio: { url: string; duration: number };

@@ -1,6 +1,6 @@
-import { falRequest, downloadFile } from './client.js';
+import { falRequest, downloadFile, uploadToFal } from './client.js';
 import type { VideoGeneration, TalkingHeadGeneration } from '../schemas/scene.js';
-import type { FalKandinskyVideoOutput, FalFabricVideoOutput } from './types.js';
+import type { FalKandinskyVideoOutput, FalFabricVideoOutput, FalSadTalkerOutput } from './types.js';
 import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('fal-video');
@@ -19,6 +19,10 @@ function isPixVerseModel(model: string): boolean {
 
 function isFabricModel(model: string): boolean {
   return model.includes('fabric');
+}
+
+function isSadTalkerModel(model: string): boolean {
+  return model.includes('sadtalker');
 }
 
 export async function generateVideo(
@@ -185,15 +189,16 @@ export async function generateTalkingHead(
   imageUrl: string,
   outputPath: string,
 ): Promise<{ url: string; hasAudio: boolean }> {
+  const text = spec.input.text ?? '';
   log.info('Generating talking head video', {
     model: spec.model,
-    textLength: spec.input.text.length,
+    textLength: text.length,
     resolution: spec.input.resolution,
   });
 
   const input: Record<string, unknown> = {
     image_url: imageUrl,
-    text: spec.input.text,
+    text,
     resolution: spec.input.resolution ?? '720p',
   };
 
@@ -216,5 +221,60 @@ export async function generateTalkingHead(
   });
 
   // Fabric generates audio embedded in video
+  return { url: result.video.url, hasAudio: true };
+}
+
+/**
+ * Generate lip-synced talking head video using audio input (SadTalker).
+ * Unlike text-mode Fabric, this takes a pre-generated audio file (e.g. VOICEVOX)
+ * so the lip movements match the actual narration voice.
+ *
+ * @param imageUrl - URL of the face/character image (uploaded to fal.ai)
+ * @param audioPath - Local path to the narration audio file
+ * @param outputPath - Where to save the video
+ * @returns Video URL
+ */
+export async function generateTalkingHeadWithAudio(
+  imageUrl: string,
+  audioPath: string,
+  outputPath: string,
+  options?: {
+    poseStyle?: number;
+    expressionScale?: number;
+    faceModelResolution?: '256' | '512';
+  },
+): Promise<{ url: string; hasAudio: boolean }> {
+  log.info('Generating talking head with audio (SadTalker)', {
+    audioPath,
+    poseStyle: options?.poseStyle ?? 0,
+    resolution: options?.faceModelResolution ?? '512',
+  });
+
+  // Upload the narration audio to fal.ai storage
+  const audioUrl = await uploadToFal(audioPath);
+
+  const input: Record<string, unknown> = {
+    source_image_url: imageUrl,
+    driven_audio_url: audioUrl,
+    face_model_resolution: options?.faceModelResolution ?? '512',
+    expression_scale: options?.expressionScale ?? 1.0,
+    pose_style: options?.poseStyle ?? 0,
+    // "full" keeps the entire source image (body + background) instead of cropping to face
+    preprocess: 'full',
+  };
+
+  const result = await falRequest<FalSadTalkerOutput>('fal-ai/sadtalker', input);
+
+  if (!result.video?.url) {
+    throw new Error('No talking head video returned from SadTalker');
+  }
+
+  await downloadFile(result.video.url, outputPath);
+
+  log.info('SadTalker talking head video generated', {
+    url: result.video.url.slice(0, 60),
+  });
+
+  // SadTalker embeds the driven audio in the output video
   return { url: result.video.url, hasAudio: true };
 }

@@ -34,17 +34,19 @@ export const videoGenerationSchema = z.object({
 });
 
 /**
- * Talking head video generation (VEED Fabric 1.0)
- * Creates lip-synced video from a face image and speech text.
+ * Talking head video generation.
+ * Supports two modes:
+ *  - Text mode (VEED Fabric 1.0): text → internal TTS + lip-sync
+ *  - Audio mode (SadTalker): pre-generated audio → lip-sync (preferred for voice matching)
  */
 export const talkingHeadGenerationSchema = z.object({
-  model: z.string().default('veed/fabric-1.0/text'),
+  model: z.string().default('fal-ai/sadtalker'),
   input: z.object({
-    /** The speech text to lip-sync */
-    text: z.string(),
+    /** The speech text (used for Fabric text mode, or as fallback). Optional for SadTalker (audio-driven). */
+    text: z.string().optional(),
     /** Resolution: 720p or 480p */
     resolution: z.enum(['720p', '480p']).optional().default('720p'),
-    /** Optional voice description (e.g., "British accent", "Confident male voice") */
+    /** Optional voice description (Fabric text mode only) */
     voice_description: z.string().optional(),
   }),
 });
@@ -110,6 +112,8 @@ export const sceneSchema = z.object({
   text_overlay: textOverlaySchema.optional(),
   effects: z.array(z.string()).optional(),
   sound_effects: z.array(soundEffectSchema).optional(),
+  /** Override TTS voice for this scene (e.g. VOICEVOX speaker ID) */
+  voice_override: z.string().optional(),
   /** Skip Vision QA for this scene (default: false) */
   skip_qa: z.boolean().optional(),
 });

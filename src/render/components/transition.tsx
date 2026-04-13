@@ -1,8 +1,8 @@
 import { AbsoluteFill, useCurrentFrame, interpolate } from 'remotion';
 
-export type TransitionType = 'fade' | 'cut' | 'dissolve';
+export type TransitionType = 'fade' | 'cut' | 'dissolve' | 'slide-left' | 'slide-right';
 
-const FADE_FRAMES = 15; // ~0.5s at 30fps
+const TRANSITION_FRAMES = 12; // ~0.4s at 30fps
 
 export interface TransitionProps {
   type: TransitionType;
@@ -23,18 +23,48 @@ export const Transition: React.FC<TransitionProps> = ({
     return <AbsoluteFill>{children}</AbsoluteFill>;
   }
 
-  // Fade in at start
-  const fadeIn = interpolate(frame, [0, FADE_FRAMES], [0, 1], {
+  if (type === 'slide-left' || type === 'slide-right') {
+    const direction = type === 'slide-left' ? -1 : 1;
+
+    // Slide in from right/left
+    const slideIn = interpolate(frame, [0, TRANSITION_FRAMES], [direction * 100, 0], {
+      extrapolateLeft: 'clamp',
+      extrapolateRight: 'clamp',
+    });
+
+    // Slide out (skip for last scene)
+    const slideOut = isLast
+      ? 0
+      : interpolate(
+          frame,
+          [durationFrames - TRANSITION_FRAMES, durationFrames],
+          [0, -direction * 100],
+          {
+            extrapolateLeft: 'clamp',
+            extrapolateRight: 'clamp',
+          },
+        );
+
+    const translateX = frame < TRANSITION_FRAMES ? slideIn : slideOut;
+
+    return (
+      <AbsoluteFill style={{ transform: `translateX(${translateX}%)` }}>
+        {children}
+      </AbsoluteFill>
+    );
+  }
+
+  // Fade / dissolve
+  const fadeIn = interpolate(frame, [0, TRANSITION_FRAMES], [0, 1], {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
   });
 
-  // Fade out at end (skip for last scene)
   const fadeOut = isLast
     ? 1
     : interpolate(
         frame,
-        [durationFrames - FADE_FRAMES, durationFrames],
+        [durationFrames - TRANSITION_FRAMES, durationFrames],
         [1, 0],
         {
           extrapolateLeft: 'clamp',

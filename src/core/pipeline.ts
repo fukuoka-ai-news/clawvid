@@ -217,7 +217,16 @@ async function processAudio(
   if (result.generatedMusicPath) {
     musicSource = result.generatedMusicPath;
   } else if (musicConfig?.file) {
-    musicSource = musicConfig.file;
+    // Resolve relative paths against the current working directory so that
+    // workflow authors can reference project-local assets like
+    // "assets/bgm/daily-news.mp3". Absolute paths pass through unchanged.
+    const resolvedFile = resolve(musicConfig.file);
+    const { pathExists } = await import('fs-extra');
+    if (await pathExists(resolvedFile)) {
+      musicSource = resolvedFile;
+    } else {
+      log.warn('Music file not found, skipping music', { file: musicConfig.file, resolved: resolvedFile });
+    }
   } else if (musicConfig?.url) {
     // Download remote music to local file to avoid SSRF via FFmpeg protocol handlers
     const musicDownloadPath = assetManager.getAssetPath('music-downloaded.mp3');
@@ -299,7 +308,12 @@ async function generateSubtitles(
     }
   }
 
-  const subtitleSegments = buildSubtitleSegments(words, 6);
+  // VOICEVOX produces clause-level entries (split by 、。！？), so each entry
+  // should be its own subtitle segment. Whisper produces word-level entries
+  // where grouping 6 words per line makes sense.
+  const isVoicevox = workflow.audio?.tts?.model === 'voicevox';
+  const maxWordsPerLine = isVoicevox ? 1 : 6;
+  const subtitleSegments = buildSubtitleSegments(words, maxWordsPerLine);
 
   const srtPath = assetManager.getAssetPath('subtitles.srt');
   const vttPath = assetManager.getAssetPath('subtitles.vtt');
@@ -344,11 +358,23 @@ async function renderAllPlatforms(
   const fps = config.defaults.fps;
 
   // Convert subtitle segments (seconds) to Remotion subtitle entries (frames)
-  const subtitles = subtitleSegments.map((seg) => ({
-    text: seg.text,
-    startFrame: Math.round(seg.start * fps),
-    endFrame: Math.round(seg.end * fps),
-  }));
+  // Tag first scene's subtitles as 'hook' and last scene's as 'cta' for special styling
+  const firstSceneTiming = result.computedTimings[0];
+  const lastSceneTiming = result.computedTimings[result.computedTimings.length - 1];
+  const hookEnd = firstSceneTiming ? (firstSceneTiming.start + firstSceneTiming.duration) : 0;
+  const ctaStart = lastSceneTiming ? lastSceneTiming.start : Infinity;
+
+  const subtitles = subtitleSegments.map((seg) => {
+    let style: 'hook' | 'cta' | 'default' = 'default';
+    if (seg.end <= hookEnd + 0.1) style = 'hook';
+    else if (seg.start >= ctaStart - 0.1) style = 'cta';
+    return {
+      text: seg.text,
+      startFrame: Math.round(seg.start * fps),
+      endFrame: Math.round(seg.end * fps),
+      style,
+    };
+  });
 
   for (const platform of platforms) {
     const spinner = createSpinner(`Rendering ${platform}...`);
@@ -358,21 +384,60 @@ async function renderAllPlatforms(
     const compositionId = isLandscape ? 'LandscapeVideo' : 'PortraitVideo';
     const rawOutputPath = assetManager.getPlatformPath(platform, 'raw.mp4');
 
+    // Build metadata for date badge + location overlay
+    const metadataProps = buildMetadataProps(workflow);
+
     const props = {
       scenes: workflow.scenes.map((scene) => {
         const assets = result.sceneAssets.find((a) => a.sceneId === scene.id);
         const timing = result.computedTimings.find((t) => t.sceneId === scene.id);
+        // Parse video clip actual duration from generation config for loop calculation
+        let clipDurationFrames: number | undefined;
+        if (scene.type === 'video' && scene.video_generation?.input?.duration) {
+          const durStr = String(scene.video_generation.input.duration);
+          const seconds = parseFloat(durStr.replace('s', ''));
+          if (!isNaN(seconds)) {
+            clipDurationFrames = Math.round(seconds * fps);
+          }
+        }
+
+        // talking_head scenes use videoPath (lip-synced video from VEED Fabric)
+        // or fall back to avatar reference image
+        const hasVideo = (scene.type === 'video' || scene.type === 'talking_head') && assets?.videoPath;
+        const renderType = hasVideo ? 'video' as const : scene.type === 'talking_head' ? 'image' as const : scene.type as 'image' | 'video';
+
+        // Assign default transition: fade for scene changes, cut for first
+        const sceneIndex = workflow.scenes.indexOf(scene);
+        const transition = sceneIndex === 0 ? 'fade' as const : 'fade' as const;
+
         return {
           id: scene.id,
-          type: scene.type,
-          src: scene.type === 'video' && assets?.videoPath ? assets.videoPath : assets?.imagePath ?? '',
+          type: renderType,
+          src: hasVideo ? assets!.videoPath : assets?.imagePath ?? '',
           startFrame: Math.round((timing?.start ?? scene.timing?.start ?? 0) * fps),
           durationFrames: Math.round((timing?.duration ?? scene.timing?.duration ?? 5) * fps),
+          clipDurationFrames,
           effects: scene.effects ?? [],
+          transition,
         };
       }),
       audioUrl: result.fullNarrationPath ?? '',
       subtitles,
+      metadata: metadataProps,
+      // Watermark from branding config
+      watermark: config.branding?.watermark?.enabled ? {
+        text: config.branding.watermark.text,
+        position: config.branding.watermark.position as 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left' | undefined,
+        opacity: config.branding.watermark.opacity,
+      } : undefined,
+      // End card from branding config
+      endCard: config.branding?.endcard?.enabled ? {
+        enabled: true,
+        durationFrames: Math.round((config.branding.endcard.duration_seconds ?? 2) * fps),
+        followText: config.branding.endcard.follow_text,
+        likeText: config.branding.endcard.like_text,
+        channelHandle: config.branding?.watermark?.text,
+      } : undefined,
     };
 
     await renderComposition({
@@ -541,4 +606,28 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   } else {
     console.log(chalk.red('FAL_KEY: not set — add it to .env'));
   }
+}
+
+/**
+ * Build metadata props for the date badge + location overlay.
+ * Auto-generates date and day of week from current date if not provided in workflow.
+ */
+function buildMetadataProps(workflow: Workflow): { date?: string; dayOfWeek?: string; location?: string } | undefined {
+  const meta = workflow.metadata;
+  if (!meta && !workflow.metadata) return undefined;
+
+  const now = new Date();
+  const jpDays = ['日曜日', '月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日'];
+
+  // Date: use provided or auto-generate MM/DD
+  const date = meta?.date ?? `${String(now.getMonth() + 1).padStart(2, '0')}/${String(now.getDate()).padStart(2, '0')}`;
+
+  // Day of week: use provided or auto-generate
+  const dayOfWeek = meta?.day_of_week ?? jpDays[now.getDay()];
+
+  const location = meta?.location;
+
+  if (!date && !location) return undefined;
+
+  return { date, dayOfWeek, location };
 }
