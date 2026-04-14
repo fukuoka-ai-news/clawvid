@@ -1,7 +1,9 @@
-import { Composition, registerRoot } from 'remotion';
+import { Composition, Still, registerRoot } from 'remotion';
 import { LandscapeVideo } from './compositions/landscape.js';
 import { PortraitVideo } from './compositions/portrait.js';
+import { ThumbnailStill } from './components/thumbnail-still.js';
 import type { CompositionProps } from './compositions/types.js';
+import type { ThumbnailStillProps } from './components/thumbnail-still.js';
 
 const DEFAULT_FPS = 30;
 const DEFAULT_DURATION_FRAMES = 1800; // 60s fallback
@@ -50,6 +52,20 @@ const RemotionRoot: React.FC = () => {
           subtitles: [],
         }}
         calculateMetadata={calculateDuration as never}
+      />
+      <Still
+        id="Thumbnail"
+        component={ThumbnailStill as unknown as React.FC<Record<string, unknown>>}
+        width={1080}
+        height={1920}
+        defaultProps={{
+          headline: '',
+          thumbnailTitle: '',
+          date: '',
+          dayOfWeek: '',
+          slotLabel: '朝のニュース',
+          backgroundImage: '',
+        } satisfies ThumbnailStillProps}
       />
     </>
   );

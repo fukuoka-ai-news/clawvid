@@ -13,7 +13,8 @@ import { trimSilence } from '../audio/silence.js';
 import { buildSubtitleSegments, writeSRT, writeVTT, type TimedWord, type SubtitleSegment } from '../subtitles/generator.js';
 import { renderComposition } from '../render/renderer.js';
 import { encode } from '../post/encoder.js';
-import { extractThumbnail } from '../post/thumbnail.js';
+import { extractThumbnail, renderThumbnail } from '../post/thumbnail.js';
+import type { ThumbnailOptions } from '../post/thumbnail.js';
 import { getEncodingProfile, getAllPlatformIds, type PlatformId } from '../platforms/profiles.js';
 import { formatCostSummary } from '../utils/cost.js';
 import { writeJsonFile } from '../utils/files.js';
@@ -139,7 +140,9 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
   await renderAllPlatforms(workflow, result, assetManager, config, targetPlatforms, subtitleSegments);
 
   // 7. Post-process (encode + thumbnails)
-  await postProcess(assetManager, targetPlatforms);
+  // Build branded thumbnail options from workflow metadata
+  const thumbOptions = buildThumbnailOptions(workflow, result, assetManager);
+  await postProcess(assetManager, targetPlatforms, thumbOptions);
 
   // 8. Write cost summary with run tracking
   const costSummary = result.costTracker.getSummary();
@@ -451,9 +454,50 @@ async function renderAllPlatforms(
   }
 }
 
+/**
+ * Build thumbnail options from workflow metadata and generated assets.
+ * Uses the first explain scene's image as background, workflow name as headline.
+ */
+function buildThumbnailOptions(
+  workflow: Workflow,
+  result: WorkflowResult,
+  assetManager: AssetManager,
+): ThumbnailOptions | undefined {
+  if (!workflow.metadata) return undefined;
+
+  // Find first explain scene image for background
+  const explainScene = workflow.scenes.find(
+    (s) => s.id.startsWith('explain') && s.type === 'video',
+  );
+  let backgroundImagePath: string | undefined;
+  if (explainScene) {
+    const asset = result.sceneAssets.find((a) => a.sceneId === explainScene.id);
+    if (asset?.imagePath) {
+      backgroundImagePath = asset.imagePath;
+    }
+  }
+
+  // Detect slot from workflow file name or output dir name
+  let slot: string | undefined;
+  const dirName = assetManager.outputDir;
+  if (dirName.includes('morning')) slot = 'morning';
+  else if (dirName.includes('noon')) slot = 'noon';
+  else if (dirName.includes('evening')) slot = 'evening';
+
+  return {
+    date: workflow.metadata.date,
+    dayOfWeek: workflow.metadata.day_of_week,
+    slot,
+    headline: workflow.name,
+    thumbnailTitle: workflow.metadata.thumbnail_title,
+    backgroundImagePath,
+  };
+}
+
 async function postProcess(
   assetManager: AssetManager,
   platforms: PlatformId[],
+  thumbnailOptions?: ThumbnailOptions,
 ): Promise<void> {
   const spinner = createSpinner('Post-processing...');
   spinner.start();
@@ -472,10 +516,24 @@ async function postProcess(
       await copy(rawPath, finalPath);
     }
 
-    try {
-      await extractThumbnail(finalPath, thumbnailPath, 2);
-    } catch (err) {
-      log.warn(`Thumbnail extraction failed for ${platform}`, { error: String(err) });
+    // Render branded thumbnail if options are provided, else fall back to frame extraction
+    if (thumbnailOptions) {
+      try {
+        await renderThumbnail(thumbnailPath, thumbnailOptions);
+      } catch (err) {
+        log.warn(`Branded thumbnail failed for ${platform}, falling back to frame extraction`, { error: String(err) });
+        try {
+          await extractThumbnail(finalPath, thumbnailPath, 2);
+        } catch (err2) {
+          log.warn(`Thumbnail extraction also failed for ${platform}`, { error: String(err2) });
+        }
+      }
+    } else {
+      try {
+        await extractThumbnail(finalPath, thumbnailPath, 2);
+      } catch (err) {
+        log.warn(`Thumbnail extraction failed for ${platform}`, { error: String(err) });
+      }
     }
 
     const { copy, pathExists } = await import('fs-extra');
@@ -544,7 +602,8 @@ export async function runRender(options: RenderOptions): Promise<void> {
   };
 
   await renderAllPlatforms(workflow, result, assetManager, config, platforms);
-  await postProcess(assetManager, platforms);
+  const reRenderThumbOptions = buildThumbnailOptions(workflow, result, assetManager);
+  await postProcess(assetManager, platforms, reRenderThumbOptions);
 
   console.log(chalk.green.bold('Re-render complete!'));
 }
