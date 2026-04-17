@@ -1,4 +1,5 @@
-import { resolve, join, basename } from 'node:path';
+import { resolve, join, basename, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import fsExtra from 'fs-extra';
 const { pathExists } = fsExtra;
 import { createLogger } from '../utils/logger.js';
@@ -63,7 +64,9 @@ export async function renderThumbnail(
     const { renderStill, selectComposition } = await import('@remotion/renderer');
     const { link, copyFile, mkdir } = await import('node:fs/promises');
 
-    const entryPoint = resolve('src/render/root.tsx');
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+    const entryPoint = resolve(__dirname, '../../src/render/root.tsx');
 
     const bundleLocation = await bundle({
       entryPoint,

@@ -618,9 +618,15 @@ async function generateSceneAssets(
 
     if (isTalkingHeadWithAvatar) {
       // Copy avatar reference image as fallback for this scene
-      const { resolve } = await import('node:path');
+      const { resolve, isAbsolute } = await import('node:path');
       const { copyFile } = await import('node:fs/promises');
-      const avatarSrc = resolve(process.cwd(), avatarCfg!.reference_image!);
+      const { getClawvidRoot } = await import('../config/loader.js');
+      const refImg = avatarCfg!.reference_image!;
+      // Resolve against config root (falls back to clawvid install root) so it
+      // works regardless of process.cwd().
+      const avatarSrc = isAbsolute(refImg)
+        ? refImg
+        : resolve(appConfig?._configRoot ?? getClawvidRoot(), refImg);
       await copyFile(avatarSrc, imagePath);
       log.info('Copied avatar reference as scene image fallback', { sceneId: scene.id, avatarSrc, imagePath });
       spinner.text = `Scene ${scene.id}: avatar scene (reference copied)`;
@@ -652,8 +658,18 @@ async function generateSceneAssets(
       let avatarImageUrl = imageUrl;
       const avatarConfig = appConfig?.avatar;
       if (avatarConfig?.enabled && avatarConfig.reference_image) {
-        const { resolve } = await import('node:path');
-        const avatarPath = resolve(process.cwd(), avatarConfig.reference_image);
+        const { resolve, isAbsolute } = await import('node:path');
+        // Resolve avatar path against config root (falls back to clawvid install root,
+        // then cwd) so it works regardless of where clawvid is invoked from.
+        const { getClawvidRoot } = await import('../config/loader.js');
+        const refImg = avatarConfig.reference_image;
+        let avatarPath: string;
+        if (isAbsolute(refImg)) {
+          avatarPath = refImg;
+        } else {
+          const configRoot = appConfig?._configRoot ?? getClawvidRoot();
+          avatarPath = resolve(configRoot, refImg);
+        }
         const { uploadToFal } = await import('../fal/client.js');
         spinner.text = `Scene ${scene.id}: uploading avatar reference image...`;
         avatarImageUrl = await uploadToFal(avatarPath);

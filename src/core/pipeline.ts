@@ -130,7 +130,7 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
   }
 
   // 4. Audio post-processing
-  await processAudio(workflow, result, assetManager);
+  await processAudio(workflow, result, assetManager, config);
 
   // 5. Generate subtitles
   const subtitleSegments = await generateSubtitles(workflow, result, assetManager);
@@ -172,6 +172,7 @@ async function processAudio(
   workflow: Workflow,
   result: WorkflowResult,
   assetManager: AssetManager,
+  config: AppConfig,
 ): Promise<void> {
   if (result.narrationSegments.length === 0) return;
 
@@ -220,15 +221,46 @@ async function processAudio(
   if (result.generatedMusicPath) {
     musicSource = result.generatedMusicPath;
   } else if (musicConfig?.file) {
-    // Resolve relative paths against the current working directory so that
-    // workflow authors can reference project-local assets like
-    // "assets/bgm/daily-news.mp3". Absolute paths pass through unchanged.
-    const resolvedFile = resolve(musicConfig.file);
+    // Resolve relative paths with search order: cwd → config root → clawvid install root
+    // so that workflow authors can reference project-local assets like
+    // "assets/bgm/daily-news.mp3" or "clawvid/assets/bgm/daily-news.mp3" regardless
+    // of where clawvid is invoked from. Absolute paths pass through unchanged.
     const { pathExists } = await import('fs-extra');
-    if (await pathExists(resolvedFile)) {
+    const { isAbsolute } = await import('node:path');
+    const { getClawvidRoot } = await import('../config/loader.js');
+
+    let musicFile = musicConfig.file;
+    let resolvedFile: string | undefined;
+
+    if (isAbsolute(musicFile)) {
+      if (await pathExists(musicFile)) resolvedFile = musicFile;
+    } else {
+      const searchRoots = [
+        process.cwd(),
+        config._configRoot,
+        getClawvidRoot(),
+      ].filter((p): p is string => typeof p === 'string');
+      // Dedup while preserving order
+      const seen = new Set<string>();
+      for (const root of searchRoots) {
+        if (seen.has(root)) continue;
+        seen.add(root);
+        const candidate = resolve(root, musicFile);
+        if (await pathExists(candidate)) {
+          resolvedFile = candidate;
+          log.info('Music file resolved', { file: musicFile, resolvedFrom: root });
+          break;
+        }
+      }
+    }
+
+    if (resolvedFile) {
       musicSource = resolvedFile;
     } else {
-      log.warn('Music file not found, skipping music', { file: musicConfig.file, resolved: resolvedFile });
+      log.warn('Music file not found in any search root, skipping music', {
+        file: musicConfig.file,
+        searchedFrom: [process.cwd(), config._configRoot, getClawvidRoot()].filter(Boolean),
+      });
     }
   } else if (musicConfig?.url) {
     // Download remote music to local file to avoid SSRF via FFmpeg protocol handlers
