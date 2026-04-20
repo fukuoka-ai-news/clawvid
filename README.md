@@ -4,11 +4,22 @@
 
 # ClawVid
 
-> **Status: Beta** — End-to-end pipeline working. TTS-driven timing (narration drives scene duration), voice consistency (voice cloning across scenes), subtitle sync, aspect-ratio-safe encoding, Kling 2.6 video, Remotion rendering, word-level subtitles, and multi-track audio. 97 tests passing. Edge cases and hardening still in progress.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Status: Production](https://img.shields.io/badge/Status-Production-green.svg)](#production-usage)
+
+> **Status: Production** — Running in production at [@fukuoka_ai_news](https://www.tiktok.com/@fukuoka_ai_news), generating 3 AI news videos per day since 2026-04-10. End-to-end pipeline: TTS-driven timing, voice consistency (voice cloning across scenes), subtitle sync, aspect-ratio-safe encoding, Kling 2.6 video, Remotion rendering, word-level subtitles, multi-track audio, branded thumbnails. 97 tests passing.
 
 AI-powered short-form video generation CLI for [OpenClaw](https://github.com/neur0map/openclaw).
 
 Generate YouTube Shorts, TikToks, and Instagram Reels from text prompts. The OpenClaw agent orchestrates the entire pipeline — planning scenes, writing prompts, and generating a workflow JSON that ClawVid executes end-to-end.
+
+## Production Usage
+
+This is the video-generation engine behind the **Fukuoka AI News** TikTok automation pipeline. For the full orchestration layer (cron scheduling, Slack approval flow, skill definitions, narration validation, lessons learned from real-world operations), see:
+
+👉 **[fukuoka-ai-news-showcase](https://github.com/fukuoka-ai-news/fukuoka-ai-news-showcase)** — the operational glue around clawvid
+
+Published under MIT. Contributions and forks welcome.
 
 ## How It Works
 
