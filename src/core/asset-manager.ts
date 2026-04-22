@@ -36,7 +36,14 @@ export class AssetManager {
     private baseOutputDir: string,
     private slug: string,
   ) {
-    const date = new Date().toISOString().split('T')[0];
+    // Use the system's local date, not UTC, so output directory names match
+    // the operator's mental model. Previously `new Date().toISOString().split('T')[0]`
+    // produced the UTC date, which meant morning runs in JST (07:30 JST = 22:30 UTC
+    // the prior day) were filed under yesterday's date prefix. That caused
+    // operational confusion when browsing outputs even though the video
+    // content was correct.
+    const d = new Date();
+    const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     this.runId = nanoid(10);
     this.outputDir = join(baseOutputDir, `${date}-${createSlug(slug)}`);
   }
